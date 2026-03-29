@@ -985,41 +985,244 @@ function katUsia(u){
 }
 
 // ══════════════════════════════════
-// NUTRISI — MIFFLIN-ST JEOR
+// BMI & BODY COMPOSITION ESTIMATION
+// ══════════════════════════════════
+function hitungBMI(bb,tb){return bb/Math.pow(tb/100,2);}
+function katBMI(bmi){
+  if(bmi<17.5)return'Sangat Kurus';
+  if(bmi<18.5)return'Kurus';
+  if(bmi<23)return'Normal';
+  if(bmi<25)return'Sedikit Berlebih';
+  if(bmi<27.5)return'Kelebihan Berat';
+  if(bmi<30)return'Obesitas I';
+  return'Obesitas II/III';
+}
+// Estimasi body fat dari BMI (heuristik, bukan klinis)
+function estimasiBodyFat(bmi,umur,gender){
+  let bf=bmi*1.2;
+  if(gender==='wanita')bf+=5;
+  if(urang>40)bf+=3;
+  if(urang>50)bf+=5;
+  return Math.max(8,Math.min(45,Math.round(bf*10)/10));
+}
+
+// ══════════════════════════════════
+// NUTRISI — MIFFLIN-ST JEOR + ADAPTIVE
 // ══════════════════════════════════
 function hitungN(u){
+  // Validasi input dengan fallback aman
+  if(!u||!u.bb||!u.tb||!u.umur||!u.gender||!u.aktivitas||!u.tujuan){
+    console.warn('Data user tidak lengkap, pakai default');
+    u={bb:70,tb:170,umur:30,gender:'pria',aktivitas:'ringan',tujuan:'cutting',mode:'normal'};
+  }
+
+  const bmi=hitungBMI(u.bb,u.tb);
+  const bodyFatEst=estimasiBodyFat(bmi,u.umur,u.gender);
+
+  // BMR: Mifflin-St Jeor
   const bmr=u.gender==='pria'
     ?(10*u.bb)+(6.25*u.tb)-(5*u.umur)+5
     :(10*u.bb)+(6.25*u.tb)-(5*u.umur)-161;
-  const pal={mager:1.2,ringan:1.375,sedang:1.55,aktif:1.725}[u.aktivitas];
+
+  // TDEE
+  const pal={mager:1.2,ringan:1.375,sedang:1.55,aktif:1.725}[u.aktivitas]||1.375;
   const tdee=bmr*pal;
 
-  // Adjustment per tujuan
-  const adjT={cutting:-400,maintain:0,bulking:300,gain:500}[u.tujuan];
-  const adjM={santai:u.tujuan==='cutting'?100:(u.tujuan==='gain'?-100:0),normal:0,ketat:u.tujuan==='cutting'?-80:(u.tujuan==='gain'?100:0)}[u.mode];
-  const kalT=Math.max(1200,Math.round(tdee+adjT+adjM));
+  // Adjustment per tujuan — dengan safety clamp
+  let adjT=0;
+  if(u.tujuan==='cutting'){
+    // Jika BMI >30, defisit maksimal -350 (tidak terlalu agresif)
+    adjT=bmi>30?-350:-400;
+  }else if(u.tujuan==='maintain'){
+    adjT=0;
+  }else if(u.tujuan==='bulking'){
+    adjT=300;
+  }else if(u.tujuan==='gain'){
+    adjT=500;
+  }
 
-  // Protein: ISSN guidelines
-  const rP={
-    cutting:u.gender==='pria'?2.2:1.9,
-    maintain:u.gender==='pria'?1.7:1.5,
-    bulking:u.gender==='pria'?1.8:1.6,
-    gain:u.gender==='pria'?1.4:1.2,
-  }[u.tujuan];
+  // Age adjustment: usia >50 lebih konservatif
+  const ageAdj=u.umur>50?(u.tujuan==='cutting'?100:-100):0;
+
+  // Mode adjustment
+  const adjM={
+    santai:u.tujuan==='cutting'?100:(u.tujuan==='gain'||u.tujuan==='bulking'?-100:0),
+    normal:0,
+    ketat:u.tujuan==='cutting'?-80:(u.tujuan==='gain'||u.tujuan==='bulking'?100:0)
+  }[u.mode]||0;
+
+  // Target kalori dengan floor 1200 (minimum aman)
+  const kalT=Math.max(1200,Math.round(tdee+adjT+adjM+ageAdj));
+
+  // ══════════════════════════════════
+  // PROTEIN (PRIORITAS 1)
+  // ══════════════════════════════════
+  // Base protein per tujuan
+  let rP=0;
+  if(u.tujuan==='cutting'){
+    rP=u.gender==='pria'?2.2:1.9;
+  }else if(u.tujuan==='bulking'){
+    rP=u.gender==='pria'?1.8:1.6;
+  }else if(u.tujuan==='gain'){
+    rP=u.gender==='pria'?1.4:1.2;
+  }else{
+    rP=u.gender==='pria'?1.7:1.5;
+  }
+
+  // Age correction: lansia butuh protein lebih tinggi
   const korU=katUsia(u.umur)==='lansia'?0.2:katUsia(u.umur)==='pra-lansia'?0.1:0;
-  const protein=Math.round(u.bb*(rP+korU));
+
+  // BMI adjustment: BMI tinggi → protein lebih tinggi
+  const korBMI=bmi>27?0.15:bmi<18.5?-0.1:0;
+
+  // Hitung protein base
+  let protein=Math.round(u.bb*(rP+korU+korBMI));
+
+  // HARD FLOOR: 1.6 g/kg (tidak boleh kurang)
+  const proteinFloor=Math.round(u.bb*1.6);
+  protein=Math.max(protein,proteinFloor);
+
+  // MAX: 35% kalori total
+  const proteinMaxCal=Math.floor((kalT*0.35)/4);
+  protein=Math.min(protein,proteinMaxCal);
+
   const kalP=protein*4;
-  const pctL=u.tujuan==='cutting'?0.25:0.28;
-  const kalL=Math.round(kalT*pctL);
-  const lemak=Math.round(kalL/9);
-  const kalK=Math.max(0,kalT-kalP-kalL);
-  const karbo=Math.round(kalK/4);
+  const pctProtein=Math.round((kalP/kalT)*100);
+
+  // ══════════════════════════════════
+  // LEMAK (PRIORITAS 2)
+  // ══════════════════════════════════
+  let pctLemak=0;
+  if(u.tujuan==='cutting'){
+    pctLemak=bmi>27?0.22:0.25;
+  }else if(u.tujuan==='bulking'||u.tujuan==='gain'){
+    pctLemak=0.28;
+  }else{
+    pctLemak=0.27;
+  }
+
+  const kalL=Math.round(kalT*pctLemak);
+  let lemak=Math.round(kalL/9);
+
+  // Minimum lemak: 0.8 g/kg (0.6 untuk overweight cutting)
+  const lemakFloor=u.tujuan==='cutting'&&bmi>27?Math.round(u.bb*0.6):Math.round(u.bb*0.8);
+  lemak=Math.max(lemak,lemakFloor);
+
+  const kalLemakAktual=lemak*9;
+  const pctLemakAktual=Math.round((kalLemakAktual/kalT)*100);
+
+  // ══════════════════════════════════
+  // KARBO (PRIORITAS 3)
+  // ══════════════════════════════════
+  const kalSisa=kalT-kalP-kalLemakAktual;
+  let karbo=Math.round(kalSisa/4);
+
+  // Minimum karbo: 80g/hari
+  const karboFloor=80;
+  if(karbo<karboFloor){
+    const defisitKarbo=karboFloor-karbo;
+    const kalButuh=defisitKarbo*4;
+    const lemakBisaTurun=Math.max(0,lemak-lemakFloor);
+    const kalDariLemak=lemakBisaTurun*9;
+
+    if(kalDariLemak>=kalButuh){
+      lemak-=Math.round(kalButuh/9);
+      karbo=karboFloor;
+    }else{
+      lemak=lemakFloor;
+      karbo=karboFloor;
+    }
+  }
+
+  const kalKarbo=karbo*4;
+  const pctKarbo=Math.round((kalKarbo/kalT)*100);
+
+  // ══════════════════════════════════
+  // FINAL CALORIE CHECK
+  // ══════════════════════════════════
+  const kalTotal=kalP+(lemak*9)+kalKarbo;
+  const selisihKal=Math.abs(kalTotal-kalT);
+
+  if(selisihKal>100){
+    const adjGram=Math.round(selisihKal/4);
+    if(kalTotal>kalT){
+      karbo=Math.max(karboFloor,karbo-adjGram);
+    }else{
+      karbo+=adjGram;
+    }
+  }
+
+  // Pembagian per waktu makan
+  const kP=Math.round(kalT*0.30);
+  const kS=Math.round(kalT*0.40);
+  const kM=kalT-kP-kS;
+
+  const proP=Math.round(protein*0.30);
+  const proS=Math.round(protein*0.40);
+  const proM=protein-proP-proS;
 
   return{
-    bmr:Math.round(bmr),tdee:Math.round(tdee),kalT,protein,karbo,lemak,
-    kP:Math.round(kalT*.30),kS:Math.round(kalT*.40),kM:Math.round(kalT*.30),
-    proP:Math.round(protein*.30),proS:Math.round(protein*.40),proM:Math.round(protein*.30),
+    bmr:Math.round(bmr),
+    tdee:Math.round(tdee),
+    kalT,
+    protein,
+    karbo,
+    lemak,
+    kP,kS,kM,
+    proP,proS,proM,
+    bmi:bmi.toFixed(1),
+    bmiKat:katBMI(bmi),
+    bodyFatEst,
+    pctProtein,
+    pctLemak:pctLemakAktual,
+    pctKarbo:pctKarbo,
   };
+}
+
+// ══════════════════════════════════
+// ADAPTIVE CALORIE ADJUSTMENT
+// ══════════════════════════════════
+function adaptiveCalorieAdjustment(){
+  if(!U||rwBB.length<3)return N;
+
+  const data7=rwBB.slice(-7);
+  if(data7.length<3)return N;
+
+  const avgAwal=data7.slice(0,2).reduce((a,b)=>a+b.bb,0)/2;
+  const avgAkhir=data7.slice(-2).reduce((a,b)=>a+b.bb,0)/2;
+  const delta=avgAkhir-avgAwal;
+  const mggJalan=Math.max(1,data7.length/7);
+  const deltaPerMgg=delta/mggJalan;
+
+  let adj=0;
+  if(U.tujuan==='cutting'){
+    if(deltaPerMgg<-1.2)adj=150;
+    else if(Math.abs(deltaPerMgg)<0.3&&data7.length>=7)adj=-150;
+  }else if(U.tujuan==='bulking'||U.tujuan==='gain'){
+    if(deltaPerMgg>1.0)adj=-150;
+    else if(deltaPerMgg<0.2&&data7.length>=7)adj=150;
+  }else{
+    if(Math.abs(deltaPerMgg)>1)adj=deltaPerMgg>0?-100:100;
+  }
+
+  adj=Math.max(-150,Math.min(150,adj));
+
+  if(adj!==0){
+    const kalBaru=Math.max(1200,N.kalT+adj);
+    const propPro=N.protein/N.kalT;
+    const propLem=N.lemak/N.kalT;
+    const propKarb=N.karbo/N.kalT;
+
+    return{
+      ...N,
+      kalT:kalBaru,
+      protein:Math.round((kalBaru*propPro)/4),
+      lemak:Math.round((kalBaru*propLem)/9),
+      karbo:Math.round((kalBaru*propKarb)/4),
+    };
+  }
+
+  return N;
 }
 
 // ══════════════════════════════════
